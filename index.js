@@ -14,7 +14,9 @@ app.post("/webhook", async (req, res) => {
     const BOT_TOKEN = process.env.BOT_TOKEN;
     const CHAT_ID = process.env.CHAT_ID;
 
-    const message = req.body.message || "No message";
+    const message = req.body.message
+  || `📣 ${req.body.symbol || "?"} | ${req.body.tf || "?"}\n${req.body.side || "?"} | Giá: ${req.body.price || "?"}`;
+
 
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
     await fetch(url, {
