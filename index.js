@@ -20,16 +20,20 @@ const sideText = side === "LONG" ? "LONG" : "SHORT";
 // Nếu symbol có dạng BTCUSDT.P thì bạn muốn #BTC
 const hashCoin = "#" + (symbol || "").replace(".P", "").replace("USDT", "").replace("PERP", "").replace(/[^A-Z]/g, "").toUpperCase();
 
-const message =
-`${sideIcon} ${sideText}  ${hashCoin}
-🔹 Khung ${tf}
+const { side, symbol, tf, price } = req.body;
 
-👉 Entry: ${entry.toFixed(2)}
-👉 Stoploss: ${sl.toFixed(2)}
-👉 TP1: ${tp1.toFixed(2)}
-👉 TP2: ${tp2.toFixed(2)}
+const message = `
+${side === "LONG" ? "🔵 LONG" : "🔴 SHORT"}  #${symbol}
+🔹 Khung: ${tf}
 
-⚠️ Cảnh báo: Tín hiệu từ bot (tự động), chỉ mang tính tham khảo/giáo dục; không phải lời khuyến khích hay tư vấn đầu tư. Bạn tự chịu trách nhiệm với quyết định của mình.`;
+👉 Entry: ${price}
+👉 Stoploss: ${side === "LONG" ? (price * 0.99).toFixed(2) : (price * 1.01).toFixed(2)}
+
+👉 TP1: ${side === "LONG" ? (price * 1.01).toFixed(2) : (price * 0.99).toFixed(2)}
+👉 TP2: ${side === "LONG" ? (price * 1.02).toFixed(2) : (price * 0.98).toFixed(2)}
+
+⚠️ Cảnh báo: Tín hiệu từ BOT, không phải khuyến nghị đầu tư.`;
+
 
 
 
