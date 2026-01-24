@@ -14,8 +14,23 @@ app.post("/webhook", async (req, res) => {
     const BOT_TOKEN = process.env.BOT_TOKEN;
     const CHAT_ID = process.env.CHAT_ID;
 
-    const message = req.body.message
-  || `📣 ${req.body.symbol || "?"} | ${req.body.tf || "?"}\n${req.body.side || "?"} | Giá: ${req.body.price || "?"}`;
+  const sideIcon = side === "LONG" ? "🔵" : "🔴";
+const sideText = side === "LONG" ? "LONG" : "SHORT";
+
+// Nếu symbol có dạng BTCUSDT.P thì bạn muốn #BTC
+const hashCoin = "#" + (symbol || "").replace(".P", "").replace("USDT", "").replace("PERP", "").replace(/[^A-Z]/g, "").toUpperCase();
+
+const message =
+`${sideIcon} ${sideText}  ${hashCoin}
+🔹 Khung ${tf}
+
+👉 Entry: ${entry.toFixed(2)}
+👉 Stoploss: ${sl.toFixed(2)}
+👉 TP1: ${tp1.toFixed(2)}
+👉 TP2: ${tp2.toFixed(2)}
+
+⚠️ Cảnh báo: Tín hiệu từ bot (tự động), chỉ mang tính tham khảo/giáo dục; không phải lời khuyến khích hay tư vấn đầu tư. Bạn tự chịu trách nhiệm với quyết định của mình.`;
+
 
 
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
