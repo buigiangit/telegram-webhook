@@ -47,11 +47,9 @@ app.post("/webhook", async (req, res) => {
     const coinTag = "#" + symbol.replace(".P", "").replace("USDT", "").toUpperCase();
 
     const message =
-`${side === "LONG" ? "🔵 LONG" : "🔴 SHORT"}  ${coinTag}
-🔹 Khung ${tf}
-
+`${side === "LONG" ? "🔵 LONG" : "🔴 SHORT"}  ${coinTag} |${tf}
 👉 Entry: ${entry.toFixed(2)}
-👉 Stoploss: ${sl.toFixed(2)}
+👉 Stl: ${sl.toFixed(2)}
 👉 TP1: ${tp1.toFixed(2)}
 👉 TP2: ${tp2.toFixed(2)}
 
