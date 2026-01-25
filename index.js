@@ -1,18 +1,16 @@
-// index.js (Node + Express) — TradingView webhook -> ChatGPT quyết định -> gửi Telegram
-// Yêu cầu ENV:
-//   BOT_TOKEN=xxxxx
-//   CHAT_ID=-100xxxxxxxxxx
-//   OPENAI_API_KEY=sk-xxxxx
-// (khuyến nghị thêm) OPENAI_MODEL=gpt-4o-mini
-//
-// Cảnh báo: Đây là tín hiệu tự động từ bot/AI, không phải khuyến nghị đầu tư.
+// index.js — TradingView(Pine alert JSON) -> ChatGPT quyết định -> Telegram
+// ENV bắt buộc trên Render:
+//   BOT_TOKEN
+//   CHAT_ID
+//   OPENAI_API_KEY
+// (tuỳ chọn) OPENAI_MODEL=gpt-4o-mini
 
 import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
 
-// TradingView đôi khi gửi JSON (application/json) hoặc text/plain -> ta hỗ trợ cả 2
+// Support both JSON & text/plain bodies
 app.use(express.json({ limit: "1mb" }));
 app.use(express.text({ type: ["text/plain", "text/*"], limit: "1mb" }));
 
@@ -23,21 +21,22 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 // ============ CONFIG ============
-const MIN_PRICE_GAP = 200;        // vừa call LONG/SHORT mà giá lệch < 200 -> bỏ qua
-const MIN_CONFIDENCE = 65;        // AI score tối thiểu mới gửi
+const MIN_PRICE_GAP = 200;        // tín hiệu mới cách tín hiệu trước <200 -> bỏ
+const COOLDOWN_MS = 30_000;       // chống spam theo thời gian
+const MIN_CONFIDENCE = 65;        // score tối thiểu mới gửi
 const DEFAULT_SL_PCT = 1.0;       // SL ~ 1% (chưa đòn bẩy)
 const RR_TP1 = 1;                 // TP1 = 1R
 const RR_TP2 = 2;                 // TP2 = 2R
-const COOLDOWN_MS = 60_000;       // chống spam theo thời gian (60s)
 
-// nhớ tín hiệu gần nhất
 let lastSignal = { side: null, price: null, ts: 0 };
 
 // ============ HELPERS ============
 function ensureEnv() {
-  if (!BOT_TOKEN) throw new Error("Missing ENV: BOT_TOKEN");
-  if (!CHAT_ID) throw new Error("Missing ENV: CHAT_ID");
-  if (!OPENAI_API_KEY) throw new Error("Missing ENV: OPENAI_API_KEY");
+  const missing = [];
+  if (!BOT_TOKEN) missing.push("BOT_TOKEN");
+  if (!CHAT_ID) missing.push("CHAT_ID");
+  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
+  if (missing.length) throw new Error(`Missing ENV: ${missing.join(", ")}`);
 }
 
 function toNum(x) {
@@ -45,29 +44,31 @@ function toNum(x) {
   return Number.isFinite(n) ? n : null;
 }
 
-function safeJsonParse(maybeString) {
-  if (typeof maybeString !== "string") return maybeString ?? {};
-  const s = maybeString.trim();
+function safeJsonParse(body) {
+  if (typeof body === "object" && body !== null) return body;
+  if (typeof body !== "string") return {};
+  const s = body.trim();
   if (!s) return {};
-  try {
-    return JSON.parse(s);
-  } catch {
-    // nếu TradingView gửi raw text không phải JSON
-    return { message: s };
-  }
+  try { return JSON.parse(s); } catch { return { message: s }; }
 }
 
-// TradingView thường gửi "15", "15m", "1h", "240", "D", "1D"
 function formatTF(tfRaw) {
   if (tfRaw === undefined || tfRaw === null) return "";
   const s = String(tfRaw).trim();
+
   if (/^\d+$/.test(s)) {
     const n = parseInt(s, 10);
     if (n < 60) return `M${n}`;
     if (n % 60 === 0) return `H${n / 60}`;
     return `M${n}`;
   }
+
   const low = s.toLowerCase();
+  if (low === "d") return "1D";
+  if (low.endsWith("d")) {
+    const n = parseInt(low.replace("d", ""), 10);
+    if (Number.isFinite(n)) return `${n}D`;
+  }
   if (low.endsWith("m")) {
     const n = parseInt(low.replace("m", ""), 10);
     if (Number.isFinite(n)) return `M${n}`;
@@ -75,11 +76,6 @@ function formatTF(tfRaw) {
   if (low.endsWith("h")) {
     const n = parseInt(low.replace("h", ""), 10);
     if (Number.isFinite(n)) return `H${n}`;
-  }
-  if (low === "d") return "1D";
-  if (low.endsWith("d")) {
-    const n = parseInt(low.replace("d", ""), 10);
-    if (Number.isFinite(n)) return `${n}D`;
   }
   return s.toUpperCase();
 }
@@ -113,25 +109,17 @@ async function sendTelegram(text) {
   });
 
   const data = await r.json();
-  if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
+  if (!data.ok) throw new Error(`Telegram error: ${JSON.stringify(data)}`);
   return data;
 }
 
-function buildMsg({ side, symbol, tfs, entry, sl, tp1, tp2, confidence, reason }) {
+function buildTelegramMsg({ side, tfFocus, entry, sl, tp1, tp2, confidence, reason }) {
   const icon = side === "LONG" ? "🔵" : "🔴";
-  const sideText = side === "LONG" ? "LONG" : "SHORT";
+  const sideText = side;
+  const tfsLine = "|H1|M15|M30|H4|1D"; // đúng format bạn muốn
 
-  // "#BTC" theo ý bạn (có thể thay bằng symbol)
-  const symHash = "#BTC";
-
-  // format danh sách khung: |H1|M15|M30|H4|1D
-  const tfLine = tfs?.length ? `|${tfs.join("|")}` : "";
-  const tfFocus = tfs?.[0] ? `🔹 Khung ${tfs[0]}` : "🔹 Khung";
-
-  return (
-`CDT - BOT
-${icon} ${sideText} ${symHash}${tfLine}
-${tfFocus}
+  return `CDT - BOT
+${icon} ${sideText}  #BTC ${tfsLine}
 
 👉 Entry: ${entry.toFixed(2)}
 👉 Stoploss: ${sl.toFixed(2)}
@@ -139,40 +127,41 @@ ${tfFocus}
 👉 TP2: ${tp2.toFixed(2)}
 
 🔹 Score: ${Math.round(confidence)}/100
-👉 ${reason || "AI đánh giá theo dữ liệu hiện tại."}
+👉 ${reason || ""}
 
-⚠️ Cảnh báo: Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`
-  );
+⚠️ Cảnh báo: Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`;
 }
 
-// ============ CHATGPT (OPENAI) ============
-async function askChatGPT(features) {
+// ============ CHATGPT CALL ============
+async function askChatGPT(input) {
   ensureEnv();
 
-  // Prompt ngắn – đúng style bạn:
-  // 1) Confirm đảo chiều (T3)
-  // 2) Chạm vùng đỉnh/đáy nhiều nến trước
-  // 3) Chạm Sonic R (EMA34) hoặc EMA
-  // Output phải JSON
+  // input là JSON từ Pine: ema34/ema50/rsi/atr/pivot/touch/confirm...
+  // AI sẽ trả LONG/SHORT/NONE + confidence + sl_pct + rr1/rr2 + reason
   const prompt = `
-Bạn là AI hỗ trợ tín hiệu theo phong cách của tôi.
-Ưu tiên:
-(1) Nến xác nhận đảo chiều: nến đỏ -> nến xanh (LONG), nến xanh -> nến đỏ (SHORT). Bắt ở nến tiếp theo.
-(2) Chạm vùng đỉnh/đáy nhiều nến trước đó.
+Bạn là AI trader theo phong cách của tôi:
+
+✅ Ưu tiên 3 case:
+(1) Nến xác nhận đảo chiều (đỏ→xanh => LONG, xanh→đỏ => SHORT) và vào sau khi nến xác nhận đóng.
+(2) Chạm vùng đỉnh/đáy nhiều nến trước (pivot).
 (3) Chạm Sonic R (EMA34) hoặc EMA quan trọng.
 
-Hãy trả về JSON HỢP LỆ, KHÔNG thêm chữ ngoài JSON:
+⚠️ Tránh sideway/nhiễu: nếu tín hiệu yếu hoặc mâu thuẫn -> NONE.
+Hãy dùng dữ liệu JSON dưới đây để quyết định.
+
+Trả về JSON HỢP LỆ (không thêm chữ ngoài JSON):
 {
  "side":"LONG|SHORT|NONE",
  "confidence":0-100,
+ "tf_focus":"M15|M30|H1|H4|1D",
  "sl_pct":1.0,
  "rr1":1,
  "rr2":2,
- "reason":"..."
+ "reason":"1-2 câu ngắn gọn nêu case (confirm/pivot/ema34) và lý do"
 }
 
-Dữ liệu đầu vào (TradingView webhook):
-${JSON.stringify(features)}
+Dữ liệu:
+${JSON.stringify(input)}
 `.trim();
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -193,127 +182,102 @@ ${JSON.stringify(features)}
   });
 
   const data = await r.json();
-
-  // Nếu key/model sai sẽ rơi vào đây
-  if (!r.ok) {
-    throw new Error(`OpenAI error: ${JSON.stringify(data)}`);
-  }
+  if (!r.ok) throw new Error(`OpenAI error: ${JSON.stringify(data).slice(0, 400)}`);
 
   const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("OpenAI: empty content");
+  if (!content) throw new Error(`OpenAI empty response: ${JSON.stringify(data).slice(0, 300)}`);
 
   let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error(`OpenAI returned non-JSON: ${content}`);
-  }
+  try { parsed = JSON.parse(content); }
+  catch { throw new Error(`OpenAI non-JSON: ${content.slice(0, 300)}`); }
 
-  // Chuẩn hoá
   const sideRaw = String(parsed.side || "NONE").toUpperCase();
-  const side =
-    sideRaw.includes("LONG") ? "LONG" :
-    sideRaw.includes("SHORT") ? "SHORT" : "NONE";
+  const side = sideRaw.includes("LONG") ? "LONG" : sideRaw.includes("SHORT") ? "SHORT" : "NONE";
 
-  const confidence = toNum(parsed.confidence) ?? 0;
-  const sl_pct = toNum(parsed.sl_pct) ?? DEFAULT_SL_PCT;
-  const rr1 = toNum(parsed.rr1) ?? RR_TP1;
-  const rr2 = toNum(parsed.rr2) ?? RR_TP2;
-  const reason = String(parsed.reason || "").slice(0, 400);
-
-  return { side, confidence, sl_pct, rr1, rr2, reason };
+  return {
+    side,
+    confidence: toNum(parsed.confidence) ?? 0,
+    tf_focus: String(parsed.tf_focus || input.tf || "M15"),
+    sl_pct: toNum(parsed.sl_pct) ?? DEFAULT_SL_PCT,
+    rr1: toNum(parsed.rr1) ?? RR_TP1,
+    rr2: toNum(parsed.rr2) ?? RR_TP2,
+    reason: String(parsed.reason || "").slice(0, 350),
+  };
 }
 
 // ============ ROUTES ============
-// ping
 app.get("/", (_, res) => res.status(200).send("OK"));
-app.get("/health", (_, res) => res.status(200).send("OK health"));
+app.get("/health", (_, res) => {
+  const missing = [];
+  if (!BOT_TOKEN) missing.push("BOT_TOKEN");
+  if (!CHAT_ID) missing.push("CHAT_ID");
+  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
+  res.json({ ok: true, missing });
+});
 
-// test telegram
 app.post("/test-telegram", async (req, res) => {
   try {
     const body = safeJsonParse(req.body);
     const text = body?.text || "✅ TEST Telegram OK";
-    const out = await sendTelegram(text);
-    res.json({ ok: true, message_id: out.result?.message_id });
+    await sendTelegram(text);
+    res.json({ ok: true });
   } catch (e) {
     console.error("TEST TELEGRAM ERROR:", e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-/**
- * TradingView webhook:
- * URL: https://YOUR.onrender.com/webhook
- *
- * TradingView Alert "Tin nhắn" (Message) bạn nên dán JSON như sau:
- * {
- *   "symbol":"{{ticker}}",
- *   "tf":"{{interval}}",
- *   "price":"{{close}}",
- *   "tfs":"H1|M15|M30|H4|1D",
- *   "note":"BTC Bot - Confirm T3 + SR + EMA/Sonic"
- * }
- *
- * (side LONG/SHORT) sẽ do ChatGPT quyết định.
- */
+// Pine sẽ bắn JSON qua đây
 app.post("/webhook", async (req, res) => {
   try {
-    // body có thể là object hoặc string
     const body = safeJsonParse(req.body);
 
-    const symbol = String(body.symbol || body.ticker || "BTCUSDT.P");
-    const tf = body.tf || body.interval || "";  // ví dụ "15"
+    // dữ liệu tối thiểu phải có
+    const symbol = String(body.symbol || "BTCUSDT.P");
+    const tf = formatTF(body.tf || body.interval || "");
     const price = toNum(body.price || body.close || body.entry);
 
-    // Nếu TradingView không gửi giá -> không thể tính SL/TP
-    if (!price) return res.status(400).json({ ok: false, error: "Missing price (close/price/entry)" });
+    if (!price) return res.status(400).json({ ok: false, error: "Missing price (price/close/entry)" });
 
-    // list khung theo ý bạn (mặc định lấy từ tfs hoặc tf)
-    let tfs = [];
-    if (body.tfs) {
-      tfs = String(body.tfs)
-        .split("|")
-        .map(s => s.trim())
-        .filter(Boolean)
-        .map(formatTF);
-    } else if (tf) {
-      tfs = [formatTF(tf)];
-    } else {
-      tfs = ["M15"];
-    }
-
-    // chống spam theo time + giá
+    // chống spam theo thời gian + theo gap giá
     const now = Date.now();
     if (lastSignal.ts && now - lastSignal.ts < COOLDOWN_MS) {
       return res.json({ ok: true, skipped: "cooldown" });
     }
     if (lastSignal.price && Math.abs(price - lastSignal.price) < MIN_PRICE_GAP) {
-      return res.json({ ok: true, skipped: "min_gap", last: lastSignal.price, now: price });
+      return res.json({ ok: true, skipped: "min_gap", last: lastSignal, now: { price } });
     }
 
-    // ======= GỌI CHATGPT QUYẾT ĐỊNH =======
+    // ====== GỌI CHATGPT ======
     const ai = await askChatGPT({
       symbol,
-      tf: formatTF(tf),
-      tfs,
+      tf,
       price,
-      note: body.note || "",
-      // bạn có thể nhét thêm dữ liệu indicator vào đây nếu Pine gửi qua webhook
-      // ví dụ: ema34: body.ema34, rsi: body.rsi, ...
-      extra: body.extra || null,
+      ema34: toNum(body.ema34),
+      ema50: toNum(body.ema50),
+      rsi: toNum(body.rsi),
+      atr: toNum(body.atr),
+      confirmLong: toNum(body.confirmLong) === 1,
+      confirmShort: toNum(body.confirmShort) === 1,
+      touchSonic: toNum(body.touchSonic) === 1,
+      touchEMA50: toNum(body.touchEMA50) === 1,
+      touchPH: toNum(body.touchPH) === 1,
+      touchPL: toNum(body.touchPL) === 1,
+      lastPH: toNum(body.lastPH),
+      lastPL: toNum(body.lastPL),
     });
 
     if (ai.side === "NONE" || ai.confidence < MIN_CONFIDENCE) {
       return res.json({ ok: true, skipped: true, ai });
     }
 
+    // tính SL/TP theo AI (hoặc default)
     const { sl, tp1, tp2 } = calcLevels(ai.side, price, ai.sl_pct, ai.rr1, ai.rr2);
 
-    const msg = buildMsg({
+    // format telegram
+    const msg = buildTelegramMsg({
       side: ai.side,
-      symbol,
-      tfs,
+      tfFocus: ai.tf_focus || tf || "M15",
       entry: price,
       sl,
       tp1,
@@ -326,13 +290,12 @@ app.post("/webhook", async (req, res) => {
 
     lastSignal = { side: ai.side, price, ts: now };
 
-    res.json({ ok: true, sent: true, ai, levels: { entry: price, sl, tp1, tp2 }, tfs });
+    res.json({ ok: true, sent: true, ai, levels: { entry: price, sl, tp1, tp2 } });
   } catch (e) {
     console.error("WEBHOOK ERROR:", e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// IMPORTANT: Render uses PORT env
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Server running on port", PORT));
