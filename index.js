@@ -168,14 +168,15 @@ function buildTelegramHtml({
 }) {
   const icon = side === "LONG" ? "🔵" : "🔴";
 
-  // ✅ lấy đúng symbol từ Pine: body.symbol = syminfo.ticker
-  const sym = normSymbol(symbol) || "BTCUSDT";
-  const hashSym = hashtagFromSymbol(sym); // ✅ #BTC / #ETH theo symbol
+  // BTCUSDT / ETHUSDT -> #BTC / #ETH
+  const sym = normSymbol(symbol);
+  const hashSym = hashtagFromSymbol(sym);
 
-  const tfLine = tfs?.length ? `|${tfs.join("|")}` : "";
-  const tfFocus = tfs?.[0] ? `🔹 Khung ${tfs[0]}` : "🔹 Khung";
+  // lấy khung chính duy nhất (H1 / M15 / H4 ...)
+  const tfMain = tfs?.[0] ? tfs[0] : "";
 
-  const headerBold = `<b>${escapeHtml(`${icon} ${side}  ${hashSym} ${tfLine}`)}</b>`;
+  // HEADER: 🔵 LONG  #BTC|H1
+  const headerBold = `<b>${escapeHtml(`${icon} ${side}  ${hashSym}${tfMain ? "|" + tfMain : ""}`)}</b>`;
 
   const it = (label, val) =>
     `<i>👉 ${escapeHtml(label)}:</i> <b>${escapeHtml(val)}</b>`;
@@ -185,15 +186,12 @@ function buildTelegramHtml({
       ? `\n<b>🔹 Score:</b> ${escapeHtml(String(Math.round(confidence)))} / 100`
       : "";
 
-  const reasonLine = reason ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}` : "";
-
-  // (khuyên dùng) show symbol gốc để tránh nhầm coin
-  const symbolLine = `\n<b>🔹 Symbol:</b> ${escapeHtml(sym)}`;
+  const reasonLine = reason
+    ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}`
+    : "";
 
   return (
-    `${headerBold}\n` +
-    `${escapeHtml(tfFocus)}\n` +
-    `${symbolLine}\n\n` +
+    `${headerBold}\n\n` +
     `${it("Entry", entry.toFixed(2))}\n` +
     `${it("Stoploss", sl.toFixed(2))}\n` +
     `${it("TP1", tp1.toFixed(2))}\n` +
@@ -202,6 +200,7 @@ function buildTelegramHtml({
     `⚠️ <u>Cảnh báo:</u> Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`
   );
 }
+
 
 // ================= AI (ChatGPT) =================
 // Nếu body không có side -> mới gọi AI để quyết định
