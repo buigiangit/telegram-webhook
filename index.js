@@ -1,5 +1,7 @@
 import express from "express";
 import fetch from "node-fetch";
+app.get("/health", (req, res) => res.status(200).send("OK health"));
+app.get("/webhook", (req, res) => res.status(200).send("OK webhook (GET)"));
 
 const app = express();
 app.use(express.json());
