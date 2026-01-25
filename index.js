@@ -108,10 +108,10 @@ function buildMsg({ side, symbol, tfs, entry, sl, tp1, tp2 }) {
 `CDT - BOT
 ${icon} ${sideText}  ${symHash} ${tfLine ? `|${tfLine}` : ""}
 
-👉 <b>Entry:<b> ${entry.toFixed(2)}
-👉 <b>Stoploss:<b> ${sl.toFixed(2)}
-👉 <b>TP1:<b> ${tp1.toFixed(2)}
-👉 <b>TP2:<b> ${tp2.toFixed(2)}
+👉 Entry: ${entry.toFixed(2)}
+👉 Stoploss: ${sl.toFixed(2)}
+👉 TP1: ${tp1.toFixed(2)}
+👉 TP2: ${tp2.toFixed(2)}
 
 ⚠️ <i>Cảnh báo: Tín hiệu từ bot (tự động), không phải lời khuyến khích đầu tư.<i>`
   );
