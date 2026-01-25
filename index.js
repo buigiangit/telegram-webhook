@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import fetch from "node-fetch";
 
@@ -5,16 +6,16 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 // ================= ENV =================
-const BOT_TOKEN = process.env.BOT_TOKEN;          // bắt buộc
-const CHAT_ID = process.env.CHAT_ID;              // bắt buộc (group id dạng -100xxx)
+const BOT_TOKEN = process.env.BOT_TOKEN; // bắt buộc
+const CHAT_ID = process.env.CHAT_ID; // bắt buộc (group id dạng -100xxx)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // optional
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // optional
 
 // ================= CONFIG =================
-const MIN_PRICE_GAP = 200;  // chặn spam: lệch < 200 thì không gửi
+const MIN_PRICE_GAP = 200; // chặn spam: lệch < 200 thì không gửi
 const SL_PCT_DEFAULT = 1.0; // SL ~ 1%
-const RR_TP1_DEFAULT = 1;   // TP1 = 1R
-const RR_TP2_DEFAULT = 2;   // TP2 = 2R
+const RR_TP1_DEFAULT = 1; // TP1 = 1R
+const RR_TP2_DEFAULT = 2; // TP2 = 2R
 
 let lastSignal = { side: null, price: null, ts: 0 };
 
@@ -36,6 +37,39 @@ function escapeHtml(s) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+/**
+ * Chuẩn hoá symbol theo đúng Pine bạn gửi:
+ * - Pine gửi syminfo.ticker => thường "BTCUSDT", "ETHUSDT"
+ * - Nếu sau này bạn đổi sang syminfo.tickerid => có thể "BINANCE:BTCUSDT"
+ */
+function normSymbol(raw) {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (s.includes(":")) s = s.split(":").pop(); // bỏ "BINANCE:"
+  return s.toUpperCase();
+}
+
+/**
+ * Tạo hashtag từ symbol:
+ * BTCUSDT -> #BTC
+ * ETHUSDT -> #ETH
+ * BTCUSDT.P -> #BTC
+ */
+function hashtagFromSymbol(symRaw) {
+  const s = normSymbol(symRaw);
+  const cleaned = s.replace(/(\.P|\.PERP)$/i, "");
+
+  const quotes = ["USDT", "USD", "BUSD", "USDC", "FDUSD"];
+  for (const q of quotes) {
+    if (cleaned.endsWith(q) && cleaned.length > q.length) {
+      return `#${cleaned.slice(0, -q.length)}`;
+    }
+  }
+
+  const m = cleaned.match(/^[A-Z]+/);
+  return `#${m ? m[0] : cleaned || "COIN"}`;
 }
 
 // TradingView hay gửi tf: "15", "60", "240", "D", "1D", "15m", "1h"
@@ -133,17 +167,16 @@ function buildTelegramHtml({
   reason,
 }) {
   const icon = side === "LONG" ? "🔵" : "🔴";
-  const sym = (symbol || "BTCUSDT.P").toString();
-  const hashSym = "#BTC"; // bạn muốn cố định #BTC
 
-  // ví dụ: |H1|M15|M30|H4|1D
+  // ✅ lấy đúng symbol từ Pine: body.symbol = syminfo.ticker
+  const sym = normSymbol(symbol) || "BTCUSDT";
+  const hashSym = hashtagFromSymbol(sym); // ✅ #BTC / #ETH theo symbol
+
   const tfLine = tfs?.length ? `|${tfs.join("|")}` : "";
   const tfFocus = tfs?.[0] ? `🔹 Khung ${tfs[0]}` : "🔹 Khung";
 
-  // Bôi đậm phần gạch chân (bạn muốn): dòng LONG/SHORT + #BTC + tfLine
   const headerBold = `<b>${escapeHtml(`${icon} ${side}  ${hashSym} ${tfLine}`)}</b>`;
 
-  // In nghiêng phần mũi tên 👉
   const it = (label, val) =>
     `<i>👉 ${escapeHtml(label)}:</i> <b>${escapeHtml(val)}</b>`;
 
@@ -154,10 +187,13 @@ function buildTelegramHtml({
 
   const reasonLine = reason ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}` : "";
 
+  // (khuyên dùng) show symbol gốc để tránh nhầm coin
+  const symbolLine = `\n<b>🔹 Symbol:</b> ${escapeHtml(sym)}`;
+
   return (
-    `<b>CDT - BOT</b>\n` +
     `${headerBold}\n` +
-    `${escapeHtml(tfFocus)}\n\n` +
+    `${escapeHtml(tfFocus)}\n` +
+    `${symbolLine}\n\n` +
     `${it("Entry", entry.toFixed(2))}\n` +
     `${it("Stoploss", sl.toFixed(2))}\n` +
     `${it("TP1", tp1.toFixed(2))}\n` +
@@ -174,8 +210,6 @@ async function askChatGPTDecision(payload) {
     return { side: "NONE", confidence: 0, reason: "Missing OPENAI_API_KEY" };
   }
 
-  // Payload bạn gửi từ Pine/TradingView có thể gồm:
-  // price, tf, ema34, ema50, rsi, atr, confirmLong, confirmShort, touchSonic, touchEMA50, touchPH, touchPL, ...
   const prompt = `
 Bạn là AI trader BTCUSDT.P theo phong cách:
 - Ưu tiên bắt T3 (nến xác nhận đảo chiều)
@@ -207,7 +241,6 @@ ${JSON.stringify(payload)}
 
   const data = await r.json();
 
-  // Nếu hết quota / lỗi OpenAI -> throw để caller fallback
   if (!r.ok) {
     const msg = data?.error?.message || JSON.stringify(data);
     throw new Error(`OpenAI error: ${msg}`);
@@ -224,8 +257,6 @@ function ruleBasedSide(body) {
   const cS = toNum(body?.confirmShort) === 1;
   if (cL && !cS) return "LONG";
   if (cS && !cL) return "SHORT";
-
-  // fallback cuối: NONE
   return "NONE";
 }
 
@@ -246,30 +277,29 @@ app.post("/test-telegram", async (req, res) => {
 
 /**
  * TradingView Webhook
- * URL: https://telegram-webhook-y82o.onrender.com/webhook
+ * URL: https://xxxxx.onrender.com/webhook
  *
- * Nên gửi JSON ở TradingView Message:
- * LONG alert:
- * {"side":"LONG","symbol":"{{ticker}}","tf":"{{interval}}","price":"{{close}}","tfs":"H1|M15|M30|H4|1D"}
- *
- * SHORT alert:
- * {"side":"SHORT","symbol":"{{ticker}}","tf":"{{interval}}","price":"{{close}}","tfs":"H1|M15|M30|H4|1D"}
- *
- * Nếu bạn KHÔNG gửi side -> server sẽ gọi ChatGPT quyết định (nếu có OPENAI_API_KEY).
+ * Pine v6 bạn gửi bắn JSON:
+ * "symbol": syminfo.ticker  (BTCUSDT / ETHUSDT)
+ * "tf": timeframe.period
+ * "price": close
  */
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body || {};
 
     // -------- symbol / price / tf --------
-    const symbol = (body.symbol || body.ticker || "BTCUSDT.P").toString();
-    const entry =
-      toNum(body.entry) ??
-      toNum(body.price) ??
-      toNum(body.close) ??
-      null;
+    // ✅ Ưu tiên đúng theo Pine: body.symbol = syminfo.ticker
+    const symbol = normSymbol(body.symbol ?? body.ticker ?? "BTCUSDT");
 
-    if (!entry) return res.status(400).json({ ok: false, error: "Missing price/entry/close" });
+    const entry =
+      toNum(body.entry) ?? toNum(body.price) ?? toNum(body.close) ?? null;
+
+    if (!entry) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing price/entry/close" });
+    }
 
     const tfs = parseTfs(body);
 
@@ -297,7 +327,6 @@ app.post("/webhook", async (req, res) => {
         body.rr1 = ai?.rr1 ?? body.rr1;
         body.rr2 = ai?.rr2 ?? body.rr2;
       } catch (e) {
-        // QUOTA / lỗi OpenAI -> fallback không 500
         console.error("AI ERROR -> FALLBACK:", e.message);
         side = ruleBasedSide(body);
         confidence = 0;
@@ -315,7 +344,7 @@ app.post("/webhook", async (req, res) => {
         ok: true,
         skipped: "min_gap",
         last: lastSignal,
-        now: { side, entry },
+        now: { side, entry, symbol },
       });
     }
 
@@ -329,7 +358,7 @@ app.post("/webhook", async (req, res) => {
     // -------- gửi Telegram --------
     const html = buildTelegramHtml({
       side,
-      symbol,
+      symbol, // ✅ truyền đúng symbol theo Pine
       tfs,
       entry,
       sl,
@@ -343,10 +372,9 @@ app.post("/webhook", async (req, res) => {
 
     lastSignal = { side, price: entry, ts: Date.now() };
 
-    res.json({ ok: true, sent: true, side, entry, sl, tp1, tp2, tfs });
+    res.json({ ok: true, sent: true, side, symbol, entry, sl, tp1, tp2, tfs });
   } catch (e) {
     console.error("WEBHOOK ERROR:", e);
-    // Quan trọng: vẫn trả JSON rõ lỗi
     res.status(500).json({ ok: false, error: e.message });
   }
 });
