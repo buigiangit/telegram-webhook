@@ -1,42 +1,27 @@
-// index.js — TradingView(Pine alert JSON) -> ChatGPT quyết định -> Telegram
-// ENV bắt buộc trên Render:
-//   BOT_TOKEN
-//   CHAT_ID
-//   OPENAI_API_KEY
-// (tuỳ chọn) OPENAI_MODEL=gpt-4o-mini
-
 import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
-
-// Support both JSON & text/plain bodies
 app.use(express.json({ limit: "1mb" }));
-app.use(express.text({ type: ["text/plain", "text/*"], limit: "1mb" }));
 
-// ============ ENV ============
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHAT_ID = process.env.CHAT_ID;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+// ================= ENV =================
+const BOT_TOKEN = process.env.BOT_TOKEN;          // bắt buộc
+const CHAT_ID = process.env.CHAT_ID;              // bắt buộc (group id dạng -100xxx)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // optional
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // optional
 
-// ============ CONFIG ============
-const MIN_PRICE_GAP = 200;        // tín hiệu mới cách tín hiệu trước <200 -> bỏ
-const COOLDOWN_MS = 30_000;       // chống spam theo thời gian
-const MIN_CONFIDENCE = 65;        // score tối thiểu mới gửi
-const DEFAULT_SL_PCT = 1.0;       // SL ~ 1% (chưa đòn bẩy)
-const RR_TP1 = 1;                 // TP1 = 1R
-const RR_TP2 = 2;                 // TP2 = 2R
+// ================= CONFIG =================
+const MIN_PRICE_GAP = 200;  // chặn spam: lệch < 200 thì không gửi
+const SL_PCT_DEFAULT = 1.0; // SL ~ 1%
+const RR_TP1_DEFAULT = 1;   // TP1 = 1R
+const RR_TP2_DEFAULT = 2;   // TP2 = 2R
 
 let lastSignal = { side: null, price: null, ts: 0 };
 
-// ============ HELPERS ============
+// ================= HELPERS =================
 function ensureEnv() {
-  const missing = [];
-  if (!BOT_TOKEN) missing.push("BOT_TOKEN");
-  if (!CHAT_ID) missing.push("CHAT_ID");
-  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
-  if (missing.length) throw new Error(`Missing ENV: ${missing.join(", ")}`);
+  if (!BOT_TOKEN) throw new Error("Missing ENV: BOT_TOKEN");
+  if (!CHAT_ID) throw new Error("Missing ENV: CHAT_ID");
 }
 
 function toNum(x) {
@@ -44,17 +29,20 @@ function toNum(x) {
   return Number.isFinite(n) ? n : null;
 }
 
-function safeJsonParse(body) {
-  if (typeof body === "object" && body !== null) return body;
-  if (typeof body !== "string") return {};
-  const s = body.trim();
-  if (!s) return {};
-  try { return JSON.parse(s); } catch { return { message: s }; }
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
+// TradingView hay gửi tf: "15", "60", "240", "D", "1D", "15m", "1h"
 function formatTF(tfRaw) {
-  if (tfRaw === undefined || tfRaw === null) return "";
+  if (tfRaw === null || tfRaw === undefined) return "";
   const s = String(tfRaw).trim();
+  if (!s) return "";
 
   if (/^\d+$/.test(s)) {
     const n = parseInt(s, 10);
@@ -64,11 +52,6 @@ function formatTF(tfRaw) {
   }
 
   const low = s.toLowerCase();
-  if (low === "d") return "1D";
-  if (low.endsWith("d")) {
-    const n = parseInt(low.replace("d", ""), 10);
-    if (Number.isFinite(n)) return `${n}D`;
-  }
   if (low.endsWith("m")) {
     const n = parseInt(low.replace("m", ""), 10);
     if (Number.isFinite(n)) return `M${n}`;
@@ -77,12 +60,35 @@ function formatTF(tfRaw) {
     const n = parseInt(low.replace("h", ""), 10);
     if (Number.isFinite(n)) return `H${n}`;
   }
+
+  if (low === "d") return "1D";
+  if (low.endsWith("d")) {
+    const n = parseInt(low.replace("d", ""), 10);
+    if (Number.isFinite(n)) return `${n}D`;
+  }
+
   return s.toUpperCase();
 }
 
-function calcLevels(side, entry, slPct = DEFAULT_SL_PCT, rr1 = RR_TP1, rr2 = RR_TP2) {
+function parseTfs(body) {
+  // ưu tiên body.tfs = "H1|M15|M30|H4|1D"
+  if (body?.tfs) {
+    return String(body.tfs)
+      .split("|")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map(formatTF);
+  }
+  // fallback: tf hoặc interval
+  const one = body?.tf ?? body?.interval ?? body?.timeframe;
+  if (one) return [formatTF(one)];
+  return [];
+}
+
+function calcLevels(side, entry, slPct, rr1, rr2) {
   const slDist = entry * (slPct / 100);
   let sl, tp1, tp2;
+
   if (side === "LONG") {
     sl = entry - slDist;
     tp1 = entry + slDist * rr1;
@@ -95,73 +101,91 @@ function calcLevels(side, entry, slPct = DEFAULT_SL_PCT, rr1 = RR_TP1, rr2 = RR_
   return { sl, tp1, tp2 };
 }
 
-async function sendTelegram(text) {
+async function sendTelegramHtml(html) {
   ensureEnv();
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: CHAT_ID,
-      text,
+      text: html,
+      parse_mode: "HTML",
       disable_web_page_preview: true,
     }),
   });
 
   const data = await r.json();
-  if (!data.ok) throw new Error(`Telegram error: ${JSON.stringify(data)}`);
+  if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
   return data;
 }
 
-function buildTelegramMsg({ side, tfFocus, entry, sl, tp1, tp2, confidence, reason }) {
+function buildTelegramHtml({
+  side,
+  symbol,
+  tfs,
+  entry,
+  sl,
+  tp1,
+  tp2,
+  confidence,
+  reason,
+}) {
   const icon = side === "LONG" ? "🔵" : "🔴";
-  const sideText = side;
-  const tfsLine = "|H1|M15|M30|H4|1D"; // đúng format bạn muốn
+  const sym = (symbol || "BTCUSDT.P").toString();
+  const hashSym = "#BTC"; // bạn muốn cố định #BTC
 
-  return `CDT - BOT
-${icon} ${sideText}  #BTC ${tfsLine}
+  // ví dụ: |H1|M15|M30|H4|1D
+  const tfLine = tfs?.length ? `|${tfs.join("|")}` : "";
+  const tfFocus = tfs?.[0] ? `🔹 Khung ${tfs[0]}` : "🔹 Khung";
 
-👉 Entry: ${entry.toFixed(2)}
-👉 Stoploss: ${sl.toFixed(2)}
-👉 TP1: ${tp1.toFixed(2)}
-👉 TP2: ${tp2.toFixed(2)}
+  // Bôi đậm phần gạch chân (bạn muốn): dòng LONG/SHORT + #BTC + tfLine
+  const headerBold = `<b>${escapeHtml(`${icon} ${side}  ${hashSym} ${tfLine}`)}</b>`;
 
-🔹 Score: ${Math.round(confidence)}/100
-👉 ${reason || ""}
+  // In nghiêng phần mũi tên 👉
+  const it = (label, val) =>
+    `<i>👉 ${escapeHtml(label)}:</i> <b>${escapeHtml(val)}</b>`;
 
-⚠️ Cảnh báo: Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`;
+  const scoreLine =
+    typeof confidence === "number"
+      ? `\n<b>🔹 Score:</b> ${escapeHtml(String(Math.round(confidence)))} / 100`
+      : "";
+
+  const reasonLine = reason ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}` : "";
+
+  return (
+    `<b>CDT - BOT</b>\n` +
+    `${headerBold}\n` +
+    `${escapeHtml(tfFocus)}\n\n` +
+    `${it("Entry", entry.toFixed(2))}\n` +
+    `${it("Stoploss", sl.toFixed(2))}\n` +
+    `${it("TP1", tp1.toFixed(2))}\n` +
+    `${it("TP2", tp2.toFixed(2))}\n` +
+    `${scoreLine}${reasonLine}\n\n` +
+    `⚠️ <u>Cảnh báo:</u> Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`
+  );
 }
 
-// ============ CHATGPT CALL ============
-async function askChatGPT(input) {
-  ensureEnv();
+// ================= AI (ChatGPT) =================
+// Nếu body không có side -> mới gọi AI để quyết định
+async function askChatGPTDecision(payload) {
+  if (!OPENAI_API_KEY) {
+    return { side: "NONE", confidence: 0, reason: "Missing OPENAI_API_KEY" };
+  }
 
-  // input là JSON từ Pine: ema34/ema50/rsi/atr/pivot/touch/confirm...
-  // AI sẽ trả LONG/SHORT/NONE + confidence + sl_pct + rr1/rr2 + reason
+  // Payload bạn gửi từ Pine/TradingView có thể gồm:
+  // price, tf, ema34, ema50, rsi, atr, confirmLong, confirmShort, touchSonic, touchEMA50, touchPH, touchPL, ...
   const prompt = `
-Bạn là AI trader theo phong cách của tôi:
-
-✅ Ưu tiên 3 case:
-(1) Nến xác nhận đảo chiều (đỏ→xanh => LONG, xanh→đỏ => SHORT) và vào sau khi nến xác nhận đóng.
-(2) Chạm vùng đỉnh/đáy nhiều nến trước (pivot).
-(3) Chạm Sonic R (EMA34) hoặc EMA quan trọng.
-
-⚠️ Tránh sideway/nhiễu: nếu tín hiệu yếu hoặc mâu thuẫn -> NONE.
-Hãy dùng dữ liệu JSON dưới đây để quyết định.
-
-Trả về JSON HỢP LỆ (không thêm chữ ngoài JSON):
-{
- "side":"LONG|SHORT|NONE",
- "confidence":0-100,
- "tf_focus":"M15|M30|H1|H4|1D",
- "sl_pct":1.0,
- "rr1":1,
- "rr2":2,
- "reason":"1-2 câu ngắn gọn nêu case (confirm/pivot/ema34) và lý do"
-}
-
+Bạn là AI trader BTCUSDT.P theo phong cách:
+- Ưu tiên bắt T3 (nến xác nhận đảo chiều)
+- Ưu tiên vùng chạm Sonic R (EMA34) / EMA50
+- Ưu tiên chạm vùng đỉnh/đáy gần nhất (SR)
+- Tránh spam: nếu tín hiệu mới quá gần tín hiệu trước (<200 giá) thì nên NONE
+Chỉ trả JSON hợp lệ dạng:
+{"side":"LONG|SHORT|NONE","confidence":0-100,"sl_pct":1,"rr1":1,"rr2":2,"reason":"..."}
 Dữ liệu:
-${JSON.stringify(input)}
+${JSON.stringify(payload)}
 `.trim();
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -174,7 +198,7 @@ ${JSON.stringify(input)}
       model: OPENAI_MODEL,
       temperature: 0.2,
       messages: [
-        { role: "system", content: "Chỉ trả JSON hợp lệ theo schema yêu cầu." },
+        { role: "system", content: "Chỉ trả JSON hợp lệ, không thêm chữ." },
         { role: "user", content: prompt },
       ],
       response_format: { type: "json_object" },
@@ -182,44 +206,37 @@ ${JSON.stringify(input)}
   });
 
   const data = await r.json();
-  if (!r.ok) throw new Error(`OpenAI error: ${JSON.stringify(data).slice(0, 400)}`);
+
+  // Nếu hết quota / lỗi OpenAI -> throw để caller fallback
+  if (!r.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`OpenAI error: ${msg}`);
+  }
 
   const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error(`OpenAI empty response: ${JSON.stringify(data).slice(0, 300)}`);
-
-  let parsed;
-  try { parsed = JSON.parse(content); }
-  catch { throw new Error(`OpenAI non-JSON: ${content.slice(0, 300)}`); }
-
-  const sideRaw = String(parsed.side || "NONE").toUpperCase();
-  const side = sideRaw.includes("LONG") ? "LONG" : sideRaw.includes("SHORT") ? "SHORT" : "NONE";
-
-  return {
-    side,
-    confidence: toNum(parsed.confidence) ?? 0,
-    tf_focus: String(parsed.tf_focus || input.tf || "M15"),
-    sl_pct: toNum(parsed.sl_pct) ?? DEFAULT_SL_PCT,
-    rr1: toNum(parsed.rr1) ?? RR_TP1,
-    rr2: toNum(parsed.rr2) ?? RR_TP2,
-    reason: String(parsed.reason || "").slice(0, 350),
-  };
+  return JSON.parse(content);
 }
 
-// ============ ROUTES ============
+// Fallback rule-based (khi AI lỗi/quota)
+function ruleBasedSide(body) {
+  // nếu Pine gửi confirmLong/confirmShort (1/0)
+  const cL = toNum(body?.confirmLong) === 1;
+  const cS = toNum(body?.confirmShort) === 1;
+  if (cL && !cS) return "LONG";
+  if (cS && !cL) return "SHORT";
+
+  // fallback cuối: NONE
+  return "NONE";
+}
+
+// ================= ROUTES =================
 app.get("/", (_, res) => res.status(200).send("OK"));
-app.get("/health", (_, res) => {
-  const missing = [];
-  if (!BOT_TOKEN) missing.push("BOT_TOKEN");
-  if (!CHAT_ID) missing.push("CHAT_ID");
-  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
-  res.json({ ok: true, missing });
-});
+app.get("/health", (_, res) => res.status(200).send("OK health"));
 
 app.post("/test-telegram", async (req, res) => {
   try {
-    const body = safeJsonParse(req.body);
-    const text = body?.text || "✅ TEST Telegram OK";
-    await sendTelegram(text);
+    const text = req.body?.text || "✅ TEST Telegram OK";
+    await sendTelegramHtml(`<b>${escapeHtml(text)}</b>`);
     res.json({ ok: true });
   } catch (e) {
     console.error("TEST TELEGRAM ERROR:", e);
@@ -227,75 +244,113 @@ app.post("/test-telegram", async (req, res) => {
   }
 });
 
-// Pine sẽ bắn JSON qua đây
+/**
+ * TradingView Webhook
+ * URL: https://telegram-webhook-y82o.onrender.com/webhook
+ *
+ * Nên gửi JSON ở TradingView Message:
+ * LONG alert:
+ * {"side":"LONG","symbol":"{{ticker}}","tf":"{{interval}}","price":"{{close}}","tfs":"H1|M15|M30|H4|1D"}
+ *
+ * SHORT alert:
+ * {"side":"SHORT","symbol":"{{ticker}}","tf":"{{interval}}","price":"{{close}}","tfs":"H1|M15|M30|H4|1D"}
+ *
+ * Nếu bạn KHÔNG gửi side -> server sẽ gọi ChatGPT quyết định (nếu có OPENAI_API_KEY).
+ */
 app.post("/webhook", async (req, res) => {
   try {
-    const body = safeJsonParse(req.body);
+    const body = req.body || {};
 
-    // dữ liệu tối thiểu phải có
-    const symbol = String(body.symbol || "BTCUSDT.P");
-    const tf = formatTF(body.tf || body.interval || "");
-    const price = toNum(body.price || body.close || body.entry);
+    // -------- symbol / price / tf --------
+    const symbol = (body.symbol || body.ticker || "BTCUSDT.P").toString();
+    const entry =
+      toNum(body.entry) ??
+      toNum(body.price) ??
+      toNum(body.close) ??
+      null;
 
-    if (!price) return res.status(400).json({ ok: false, error: "Missing price (price/close/entry)" });
+    if (!entry) return res.status(400).json({ ok: false, error: "Missing price/entry/close" });
 
-    // chống spam theo thời gian + theo gap giá
-    const now = Date.now();
-    if (lastSignal.ts && now - lastSignal.ts < COOLDOWN_MS) {
-      return res.json({ ok: true, skipped: "cooldown" });
+    const tfs = parseTfs(body);
+
+    // -------- side: ưu tiên lấy từ TradingView --------
+    let side = null;
+    const sideRaw = (body.side || body.signal || "").toString().toUpperCase();
+    if (sideRaw.includes("LONG")) side = "LONG";
+    if (sideRaw.includes("SHORT")) side = "SHORT";
+
+    let confidence = null;
+    let reason = "";
+
+    // -------- nếu không có side thì dùng AI (hoặc fallback) --------
+    if (!side) {
+      try {
+        const ai = await askChatGPTDecision(body);
+        const aiSide = String(ai?.side || "NONE").toUpperCase();
+        if (aiSide === "LONG" || aiSide === "SHORT") side = aiSide;
+        else side = "NONE";
+        confidence = toNum(ai?.confidence);
+        reason = ai?.reason || "";
+
+        // AI cho phép override sl/rr nếu muốn
+        body.sl_pct = ai?.sl_pct ?? body.sl_pct;
+        body.rr1 = ai?.rr1 ?? body.rr1;
+        body.rr2 = ai?.rr2 ?? body.rr2;
+      } catch (e) {
+        // QUOTA / lỗi OpenAI -> fallback không 500
+        console.error("AI ERROR -> FALLBACK:", e.message);
+        side = ruleBasedSide(body);
+        confidence = 0;
+        reason = `AI lỗi/quota -> fallback rule (${side})`;
+      }
     }
-    if (lastSignal.price && Math.abs(price - lastSignal.price) < MIN_PRICE_GAP) {
-      return res.json({ ok: true, skipped: "min_gap", last: lastSignal, now: { price } });
+
+    if (side === "NONE") {
+      return res.json({ ok: true, skipped: "side=NONE", body });
     }
 
-    // ====== GỌI CHATGPT ======
-    const ai = await askChatGPT({
+    // -------- chống spam theo khoảng giá --------
+    if (lastSignal.price && Math.abs(entry - lastSignal.price) < MIN_PRICE_GAP) {
+      return res.json({
+        ok: true,
+        skipped: "min_gap",
+        last: lastSignal,
+        now: { side, entry },
+      });
+    }
+
+    // -------- SL/TP theo RR --------
+    const slPct = toNum(body.sl_pct) ?? SL_PCT_DEFAULT;
+    const rr1 = toNum(body.rr1) ?? RR_TP1_DEFAULT;
+    const rr2 = toNum(body.rr2) ?? RR_TP2_DEFAULT;
+
+    const { sl, tp1, tp2 } = calcLevels(side, entry, slPct, rr1, rr2);
+
+    // -------- gửi Telegram --------
+    const html = buildTelegramHtml({
+      side,
       symbol,
-      tf,
-      price,
-      ema34: toNum(body.ema34),
-      ema50: toNum(body.ema50),
-      rsi: toNum(body.rsi),
-      atr: toNum(body.atr),
-      confirmLong: toNum(body.confirmLong) === 1,
-      confirmShort: toNum(body.confirmShort) === 1,
-      touchSonic: toNum(body.touchSonic) === 1,
-      touchEMA50: toNum(body.touchEMA50) === 1,
-      touchPH: toNum(body.touchPH) === 1,
-      touchPL: toNum(body.touchPL) === 1,
-      lastPH: toNum(body.lastPH),
-      lastPL: toNum(body.lastPL),
-    });
-
-    if (ai.side === "NONE" || ai.confidence < MIN_CONFIDENCE) {
-      return res.json({ ok: true, skipped: true, ai });
-    }
-
-    // tính SL/TP theo AI (hoặc default)
-    const { sl, tp1, tp2 } = calcLevels(ai.side, price, ai.sl_pct, ai.rr1, ai.rr2);
-
-    // format telegram
-    const msg = buildTelegramMsg({
-      side: ai.side,
-      tfFocus: ai.tf_focus || tf || "M15",
-      entry: price,
+      tfs,
+      entry,
       sl,
       tp1,
       tp2,
-      confidence: ai.confidence,
-      reason: ai.reason,
+      confidence,
+      reason,
     });
 
-    await sendTelegram(msg);
+    await sendTelegramHtml(html);
 
-    lastSignal = { side: ai.side, price, ts: now };
+    lastSignal = { side, price: entry, ts: Date.now() };
 
-    res.json({ ok: true, sent: true, ai, levels: { entry: price, sl, tp1, tp2 } });
+    res.json({ ok: true, sent: true, side, entry, sl, tp1, tp2, tfs });
   } catch (e) {
     console.error("WEBHOOK ERROR:", e);
+    // Quan trọng: vẫn trả JSON rõ lỗi
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
+// Render uses PORT env
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Server running on port", PORT));
