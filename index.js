@@ -154,6 +154,12 @@ async function sendTelegramHtml(html) {
   if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
   return data;
 }
+function fmtPrice(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "";
+  // làm tròn về số nguyên và format 43,250
+  return Math.round(n).toLocaleString("en-US");
+}
 
 function buildTelegramHtml({
   side,
@@ -168,15 +174,13 @@ function buildTelegramHtml({
 }) {
   const icon = side === "LONG" ? "🔵" : "🔴";
 
-  // BTCUSDT / ETHUSDT -> #BTC / #ETH
   const sym = normSymbol(symbol);
   const hashSym = hashtagFromSymbol(sym);
 
-  // lấy khung chính duy nhất (H1 / M15 / H4 ...)
   const tfMain = tfs?.[0] ? tfs[0] : "";
-
-  // HEADER: 🔵 LONG  #BTC|H1
-  const headerBold = `<b>${escapeHtml(`${icon} ${side}  ${hashSym}${tfMain ? "|" + tfMain : ""}`)}</b>`;
+  const headerBold = `<b>${escapeHtml(
+    `${icon} ${side}  ${hashSym}${tfMain ? "|" + tfMain : ""}`
+  )}</b>`;
 
   const it = (label, val) =>
     `<i>👉 ${escapeHtml(label)}:</i> <b>${escapeHtml(val)}</b>`;
@@ -186,20 +190,19 @@ function buildTelegramHtml({
       ? `\n<b>🔹 Score:</b> ${escapeHtml(String(Math.round(confidence)))} / 100`
       : "";
 
-  const reasonLine = reason
-    ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}`
-    : "";
+  const reasonLine = reason ? `\n<b>🔹 Lý do:</b> ${escapeHtml(reason)}` : "";
 
   return (
     `${headerBold}\n\n` +
-    `${it("Entry", entry.toFixed(2))}\n` +
-    `${it("Stoploss", sl.toFixed(2))}\n` +
-    `${it("TP1", tp1.toFixed(2))}\n` +
-    `${it("TP2", tp2.toFixed(2))}\n` +
+    `${it("Entry", fmtPrice(entry))}\n` +
+    `${it("Stoploss", fmtPrice(sl))}\n` +
+    `${it("TP1", fmtPrice(tp1))}\n` +
+    `${it("TP2", fmtPrice(tp2))}\n` +
     `${scoreLine}${reasonLine}\n\n` +
     `⚠️ <u>Cảnh báo:</u> Tín hiệu từ bot/AI (tự động), không phải lời khuyến khích đầu tư.`
   );
 }
+
 
 
 // ================= AI (ChatGPT) =================
