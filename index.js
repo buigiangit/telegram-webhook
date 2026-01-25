@@ -105,15 +105,14 @@ function buildMsg({ side, symbol, tfs, entry, sl, tp1, tp2 }) {
   const tfBullet = tfs?.[0] ? `🔹 Khung ${tfs[0]}` : "🔹 Khung";
 
   return (
-`CDT - BOT
-${icon} ${sideText}  ${symHash} ${tfLine ? `|${tfLine}` : ""}
+` ${icon} ${sideText}  ${symHash} ${tfLine ? `|${tfLine}` : ""}
 
 👉 Entry: ${entry.toFixed(2)}
 👉 Stoploss: ${sl.toFixed(2)}
 👉 TP1: ${tp1.toFixed(2)}
 👉 TP2: ${tp2.toFixed(2)}
 
-⚠️ <i>Cảnh báo: Tín hiệu từ bot (tự động), không phải lời khuyến khích đầu tư.<i>`
+⚠️ Cảnh báo: Tín hiệu từ bot (tự động), không phải lời khuyến khích đầu tư.`
   );
 }
 
