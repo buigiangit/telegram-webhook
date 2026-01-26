@@ -157,9 +157,21 @@ async function sendTelegramHtml(html) {
 function fmtPrice(x) {
   const n = Number(x);
   if (!Number.isFinite(n)) return "";
-  // làm tròn về số nguyên và format 43,250
-  return Math.round(n).toLocaleString("en-US");
+
+  // >= 1000: giữ logic cũ (làm tròn + format)
+  if (n >= 1000) {
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  // < 100: giữ nguyên giá trị (không làm tròn)
+  if (n < 100) {
+    return String(x);
+  }
+
+  // từ 100 đến <1000 (nếu có): vẫn làm tròn cho gọn
+  return Math.round(n).toString();
 }
+
 
 function buildTelegramHtml({
   side,
