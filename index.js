@@ -159,12 +159,12 @@ function fmtPrice(x) {
   if (!Number.isFinite(n)) return "";
 
   // >= 1000: giữ logic cũ (làm tròn + format)
-  if (n >= 1000) {
+  if (n >= 5000) {
     return Math.round(n).toLocaleString("en-US");
   }
 
   // < 100: giữ nguyên giá trị (không làm tròn)
-  if (n < 100) {
+  if (n < 5000) {
     return String(x);
   }
 
