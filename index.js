@@ -375,8 +375,8 @@ function buildTelegramHtml({ side, symbol, tf, closePrice, entry, sl, tp1, tp2 }
 
   return (
     `${header}\n\n` +
-    `${it("Close Signal", fmtPrice(closePrice))}\n` +
-    `${it("Entry", fmtPrice(entry))}\n` +
+    `${it("Entry", fmtPrice(closePrice))}\n` +
+    `${it("Khuyến nghị", fmtPrice(entry))}\n` +
     `${it("Stoploss", fmtPrice(sl))}\n` +
     `${it("TP1", fmtPrice(tp1))}\n` +
     `${it("TP2", fmtPrice(tp2))}\n\n` +
